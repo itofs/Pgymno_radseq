@@ -1,0 +1,278 @@
+#####################################################################################################################
+#																													#
+#																													#
+# 							                                                        								#	
+#                           Ito et al. 2022. Genetic connectivity among Pteronotus gymnonotus                       #																												
+#					from large populations in bat caves in Brazil and its implications for conservation				#
+#																												    #
+#																													#
+#																													#
+#####################################################################################################################
+
+
+##### DATA CLEANING #####
+
+# Software: Stacks - process_radtags
+# Input: *.fastq.gz (lane1 and lane2)
+
+process_radtags -p ../raw/ -o ./cleaned/ --renz_1 pstI --renz_2 bamHI -c -q -r -y fastq
+
+
+##### MAPPING AGAINST A REFERENCE GENOME #####
+
+# Software: BWA and Samtools
+# Input: *.fq samples.txt referencegenome.fasta
+	# *.fq = cleaned samples
+	# samples.txt = list with all the samples (one sample per line)
+	# referencegenome.fasta = indexed reference genome 
+
+
+bwa index ${ref} # run once
+
+
+ref=/scratch/project_2004344/pgymno_radseq/original_data/Pmesoamericanus_Assembly/Mesoamericanus.flye.pep.polca.fa
+
+sample=$(sed -n "$SLURM_ARRAY_TASK_ID"p samples.txt)
+
+
+bwa mem -t 8 -B 3 -O 5 -k 15 ${ref} ${sample}_fastp.fq > ${sample}.sam
+samtools view --threads 8 -Sbh ${sample}.sam | samtools sort --threads 8 - > ${sample}.sort.bam
+samtools flagstat ${sample}.sort.bam > ${sample}.flagstat.txt
+
+
+##### SNP CALL AND FILTERING + POPULATIONS #####
+
+# Software: Stacks - gstacks and populations
+# Input: *.sort.bam popmap.txt (.tsv)
+	# *.sort.bam = aligned samples, all put in the same directory (bam_dir)
+	# popmap.txt = list with all the samples and it's population (one sample per line). 
+
+
+gstacks -I ./bam_dir -S .sort.bam -O ./populations -M ./popmap.txt -t 8
+populations -P ./populations/ -M ./popmap.txt -r 0.65 --min-maf 0.05 --vcf --genepop --fstats --smooth --hwe -t 8 --structure
+
+
+##### PCA #####
+
+# Software: Plink and tidyverse (on R)
+# Input: populations.snps.vcf *.eigenval *.eigenvec
+
+VCF=/scratch/project_2004344/pgymno_radseq/stacks.snpcall/populations/populations.snps.vcf
+
+plink --vcf $VCF --double-id --allow-extra-chr --set-missing-var-ids @:# \
+--extract pgymno.prune.in \
+--make-bed --pca --out pgymno
+
+
+library(tidyverse)
+
+setwd("~/Pgymno/pgymno2022/Plink PCA")
+
+pca <- read_table("./pgymno.eigenvec", col_names = FALSE)
+eigenval <- scan("./pgymno.eigenval")
+pca <- pca[,-1]
+names(pca)[1] <- "ind"
+names(pca)[2:ncol(pca)] <- paste0("PC", 1:(ncol(pca)-1))
+pve <- data.frame(PC = 1:20, pve = eigenval/sum(eigenval)*100)
+a <- ggplot(pve, aes(PC, pve)) + geom_bar(stat = "identity")
+a + ylab("Percentage variance explained") + theme_light()
+cumsum(pve$pve)
+cave <- rep(NA, length(pca$ind))
+> cave[grep("CEBL", pca$ind)] <- "Boqueirão de Lavras"
+> cave[grep("CEGF", pca$ind)] <- "Gruta do Farias"
+> cave[grep("CEGS", pca$ind)] <- "Gruta do Sobradinho"
+> cave[grep("PEFM", pca$ind)] <- "Furna do Morcego"
+> cave[grep("PEMR", pca$ind)] <- "Meu Rei"
+> cave[grep("RNCU", pca$ind)] <- "Caverna do Urubu"
+> cave[grep("RNGA", pca$ind)] <- "Gruta do Arnold"
+> cave[grep("SECP", pca$ind)] <- "Casa de Pedra"
+> cave[grep("SEUR", pca$ind)] <- "Urubu"
+pca <- as_tibble(data.frame(pca, cave))
+
+pg1 <- ggplot(pca, aes(PC1, PC2, col = cave, fill= cave, shape = estado)) + geom_point(size = 2.5)
+pg1 <- pg1 + scale_colour_manual(values=c("#890620", "#F5006A", "#FF5C7A", "#006400", "#70E000", "#E7700D", "#FFEA00", "#03045E", "#45A3D9"), 
+breaks = c("Boqueirão de Lavras","Gruta do Sobradinho","Gruta do Farias","Caverna do Urubu","Gruta do Arnold","Meu Rei","Furna do Morcego","Casa de Pedra","Urubu"))
+pg1 <- pg1 + scale_fill_manual(values=c("#890620", "#F5006A", "#FF5C7A", "#006400", "#70E000", "#E7700D", "#FFEA00", "#03045E", "#45A3D9"), 
+breaks = c("Boqueirão de Lavras","Gruta do Sobradinho","Gruta do Farias","Caverna do Urubu","Gruta do Arnold","Meu Rei","Furna do Morcego","Casa de Pedra","Urubu"))
+pg1 <- pg1 + scale_shape_manual(values=c(21,22,24,3), breaks = c("Ceará", "Rio Grande do Norte", "Pernambuco", "Sergipe"))
+pg1 <- pg1 + scale_x_continuous(n.breaks = 3, limits = c(-1,1))
+pg1 <- pg1 + scale_y_continuous(n.breaks = 3, limits = c(-0.5,0.5))
+pg1 <- pg1 + coord_equal() 
+pg1 <- pg1 + theme_bw() + xlab(paste0("PC1 (", signif(pve$pve[1], 3), "%)")) + ylab(paste0("PC2 (", signif(pve$pve[2], 3), "%)")) + guides(colour=guide_legend(title="Caves")) + guides(shape="none")
+pg1 <- pg1 + theme(panel.background = element_rect(color="black", size=1), panel.grid.major = element_line(color="darkgray", size=0.7, linetype = "dashed"), 
+panel.grid.minor = element_line(color="darkgray", size=0.7,linetype= "dotted"), text=element_text(size=14))
+pg1 <- pg1 + theme(legend.position = "none")
+
+
+
+pg2 <- ggplot(pca, aes(PC1, PC2, col = cave, fill= cave, shape = estado)) + geom_point(size = 2.5)
+pg2 <- pg2 + scale_colour_manual(values=c("#890620", "#F5006A", "#FF5C7A", "#006400", "#70E000", "#E7700D", "#FFEA00", "#03045E", "#45A3D9"), 
+breaks = c("Boqueirão de Lavras","Gruta do Sobradinho","Gruta do Farias","Caverna do Urubu","Gruta do Arnold","Meu Rei","Furna do Morcego","Casa de Pedra","Urubu"))
+pg2 <- pg2 + scale_fill_manual(values=c("#890620", "#F5006A", "#FF5C7A", "#006400", "#70E000", "#E7700D", "#FFEA00", "#03045E", "#45A3D9"), 
+breaks = c("Boqueirão de Lavras","Gruta do Sobradinho","Gruta do Farias","Caverna do Urubu","Gruta do Arnold","Meu Rei","Furna do Morcego","Casa de Pedra","Urubu"))
+pg2 <- pg2 + scale_shape_manual(values=c(21,22,24,3), breaks = c("Ceará", "Rio Grande do Norte", "Pernambuco", "Sergipe"))
+pg2 <- pg2 + scale_x_continuous(n.breaks = 4, limits = c(-0.15,0.15))
+pg2 <- pg2 + scale_y_continuous(n.breaks = 4, limits = c(-0.15,0.15))
+pg2 <- pg2 + coord_equal() 
+pg2 <- pg2 + theme_bw() + xlab(paste0("PC1 (", signif(pve$pve[1], 3), "%)")) + ylab(paste0("PC2 (", signif(pve$pve[2], 3), "%)")) + guides(colour=guide_legend(title="Caves")) + guides(shape="none")
+pg2 <- pg2 + theme(panel.background = element_rect(color="black", size=1), panel.grid.major = element_line(color="darkgray", size=0.7, linetype = "dashed"), 
+panel.grid.minor = element_line(color="darkgray", size=0.7,linetype= "dotted"), text=element_text(size=14))
+pg2 <- pg2 + theme(legend.position = "none")
+
+
+##### Admixture #####
+
+# Software: Plink and pophelper (on R)
+# Inputs: *.bed *.Q
+
+for i in {1..9}
+do
+admixture --cv pgymno.bed $i > pgymnoadmix2_log${i}.out
+done
+
+library(pophelper)
+
+#working dir
+setwd("~/Pgymno/pgymno2022/Admixture")
+
+# use ADMIXTURE files
+afiles<- list.files(path=("./admix/"), full.names=T)
+alist <- readQ(files=afiles,filetype="basic")
+
+# qlist attributes
+attributes(alist)
+
+# tabulate basic usage
+tr1 <- tabulateQ(qlist=alist)
+tabulateQ(alist, writetable=TRUE, exportpath = getwd())
+
+# summarise basic usage
+sr1 <- summariseQ(tr1)
+summariseQ(tr1, writetable=TRUE, exportpath = getwd())
+
+# alingK
+alist1 <- alignK(alist[c(1:2)]) # K=1
+alist2 <- alignK(alist[c(3:4)]) # K=2
+
+# adding groups
+onelabset <- read.delim("pops.txt", header=F,stringsAsFactors=F)
+head(onelabset)
+onelabset <- as.data.frame(onelabset[,1])
+
+nrow(onelabset)
+
+# check if labels are a character data type
+sapply(onelabset, is.character)
+names(onelabset)[1] <- "cave"
+
+# plot
+p2 <- plotQ(alist[c(1,3)],imgoutput="join",returnplot=T,exportplot=F,basesize=11,
+            grplab=onelabset,grplabsize=3.5,linesize=0.8,pointsize=3,
+            sharedindlab=T,sortind="label",showindlab=F,useindlab=T,ordergrp=T,
+            showyaxis=T,showticks=T, panelspacer=0.4, splab=c("K=1","K=2"),
+            clustercol=c("darkgray","black"))
+
+plot(p2$plot[[1]])
+
+
+##### sNMF #####
+
+# Software: LEA (on R)
+# Input: populations.snps.vcf 
+
+setwd("~/Pgymno/Pgymno_pop")
+
+# Install LEA
+BiocManager::install("LEA")
+library("LEA")
+
+# Test K (K= 1-10, since I have 09 samplesites) for different alpha values 
+alfa1 = snmf("populations.snps.vcf", K = 1:10, ploidy = 2, entropy = T, alpha = 1, project = "new",iteration=10000, repetition=100, seed = 10, CPU=3)
+
+alfa10 = snmf("populations.snps.vcf", K = 1:10, ploidy = 2, entropy = T, alpha = 10, project = "new",iteration=10000, repetition=100, seed = 10, CPU=3)
+
+alfa100 = snmf("populations.snps.vcf", K = 1:10, ploidy = 2, entropy = T, alpha = 100, project = "new",iteration=10000, repetition=100, seed = 10, CPU=3)
+
+alfa1000 = snmf("populations.snps.vcf", K = 1:10, ploidy = 2, entropy = T, alpha = 1000, project = "new",iteration=10000, repetition=100, seed = 10, CPU=3)
+
+# Plot cross-entropy for each K
+
+plot(alfa1, col = "black", cex = 1.4, pch = 19)
+plot(alfa10, col = "black", cex = 1.4, pch = 19)
+plot(alfa100, col = "black", cex = 1.4, pch = 19)
+plot(alfa1000, col = "black", cex = 1.4, pch = 19)
+
+# Select K: lowest cross-entropy value
+K=1 em todos os alpha
+> K=1 alpha=100
+
+# Select best run for K=1
+> best.a1 = cross.entropy(alfa1, K = 1)
+best.a1
+min(best.a1)
+[1] 0.6619506
+
+> best.a10 = cross.entropy(alfa10, K = 1)
+best.a10
+min(best.a10)
+[1] 0.6619506
+
+> best.a100 = cross.entropy(alfa100, K = 1)
+best.a100
+min(best.a100)
+[1] 0.6619506
+
+> best.a1000 = cross.entropy(alfa1000, K = 1)
+best.a1000
+min(best.a1000)
+[1] 0.6619506
+
+# Plot the best run
+> bestrun<-min(best.a1,best.a10,best.a100,best.a1000);bestrun
+[1] 0.6619506
+
+> plot(best.a1)
+
+# Select the run with the lowest cross-entropy value
+> bestrunpgymnoalfa1 = which.min(best.a1)
+bestrunpgymnoalfa1
+[1] 70
+
+> bestrunpgymnoalfa10 = which.min(best.a10)
+bestrunpgymnoalfa10
+[1] 70
+
+> bestrunpgymnoalfa100 = which.min(best.a100)
+bestrunpgymnoalfa100
+[1] 70
+
+> bestrunpgymnoalfa1000 = which.min(best.a1000)
+bestrunpgymnoalfa1000
+[1] 70
+
+# Qplot
+qmatrixpgymnoalfa1 = Q(alfa1, K = 1,run=bestrunpgymnoalfa1)
+qmatrixpgymnoalfa1
+
+barplot(t(qmatrixpgymnoalfa1), col = c("gray", "black"), border = NA, space = 0, xlab = "Individuals", ylab = "Admixture coefficients K = 1", width = 0.5)
+
+# Save Qmatrix
+write.csv(qmatrixpgymnoalfa1,"qmatrix_pgymnoK2.csv")
+
+
+##### Mantel test #####
+
+
+pg.geo=read.table("geodistances_pgymno_cavescode.txt",header=T,sep="\t",stringsAsFactors=F)
+
+pg.fst=read.table("populations.fst_summary.tsv",header=T,sep="\t",stringsAsFactors=F)
+
+
+require(geosphere)
+geodistances=distm(cbind(pg.geo$Longitude,pg.geo$Latitude), fun = distHaversine) #km-dists (v1)
+geodistances=geodistances/1000
+
+as.matrix(geodistances)[1:5, 1:5]
+as.matrix(pg.fst)[1:5, 1:5]
+
+mantel.rtest(as.dist(pg.fst), as.dist(geodistances), nrepet = 1000)
